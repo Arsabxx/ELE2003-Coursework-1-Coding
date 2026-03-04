@@ -1,243 +1,206 @@
-// T-Junction with separated main left/right + stem exit + pedestrian on stem
-// - Main left and right NOT simultaneous for turning into stem
-// - Ped request waits for full cycle end
-// - Auto ped every N cycles if no button pressed
-
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <LiquidCrystal_I2C.h>
 
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // Change to 0x3F if display doesn't work
 
-// Pins (example - adjust)
-const int LEFT_G  = 13; const int LEFT_Y  = 12; const int LEFT_R  = 11;
-const int RIGHT_G = 10; const int RIGHT_Y = 9;  const int RIGHT_R = 8;
-const int STEM_G  = 7;  const int STEM_Y  = 6;  const int STEM_R  = 5;
-const int PED_G   = 4;  const int PED_R   = 3;
-const int BUTTON  = 2;
+// Pin definitions
+const int leftRed       = 2;
+const int leftYellow    = 3;
+const int leftStraight  = 4;   // Straight green
+const int leftTurn      = 5;   // Left-turn green
+const int stemRed       = 6;
+const int stemYellow    = 7;
+const int stemGreen     = 8;
+const int pedRed        = 9;
+const int pedGreen      = 10;
+const int buzzerPin     = 11;
+const int buttonPin     = 12;
 
-// Timings
-const unsigned long LEFT_GO_TIME   = 20000UL;
-const unsigned long RIGHT_GO_TIME  = 20000UL;
-const unsigned long STEM_GO_TIME   = 15000UL;
-const unsigned long YELLOW_TIME    =  4000UL;
-const unsigned long PED_TIME       = 12000UL;
-const unsigned long PED_FLASH_TIME =  4000UL;
+// Timing constants (in milliseconds)
+const unsigned long GREEN_TIME     = 5000;
+const unsigned long YELLOW_TIME    = 3000;
+const unsigned long PED_TIME       = 10000;
+const unsigned long PED_FLASH_TIME = 3000;  // Last 3 seconds: flashing + beeping
 
-// Auto ped every how many full cycles (if no button)
-const int AUTO_PED_EVERY_CYCLES = 2;
+// State machine phases
+enum Phase { LEFT_GREEN, LEFT_TO_STEM_YELLOW, STEM_GREEN, STEM_TO_LEFT_YELLOW, PED_GREEN };
+Phase currentPhase = LEFT_GREEN;
+Phase nextPhaseAfterPed = STEM_GREEN;  // Remember which phase to resume after pedestrian
+unsigned long phaseStartTime = 0;
 
-// States
-enum TrafficState {
-  MAIN_LEFT_GO,
-  MAIN_RIGHT_GO,
-  STEM_GO,
-  YELLOW_CLEAR,
-  PED_WALK,
-  PED_FLASH
-};
+bool pedRequest = false;
 
-TrafficState currentState = MAIN_LEFT_GO;
-unsigned long stateStart = 0;
-bool pedRequested = false;
-bool btnDebounce = false;
-int cycleCount = 0;           
+// Set all vehicle lights at once (junction control)
+void setJunction(bool lRed, bool lYel, bool lStr, bool lTur, bool sRed, bool sYel, bool sGre) {
+  digitalWrite(leftRed,      lRed);
+  digitalWrite(leftYellow,   lYel);
+  digitalWrite(leftStraight, lStr);
+  digitalWrite(leftTurn,     lTur);
+  digitalWrite(stemRed,      sRed);
+  digitalWrite(stemYellow,   sYel);
+  digitalWrite(stemGreen,    sGre);
+}
 
+void setPedRed() {
+  digitalWrite(pedRed, HIGH);
+  digitalWrite(pedGreen, LOW);
+}
+
+// Enter pedestrian phase: left keeps straight green but turn off, stem full red
+void goToPedPhase() {
+  setJunction(false, false, true, false, true, false, false);  // Left straight ON, turn OFF; Stem red
+  
+  digitalWrite(pedGreen, HIGH);
+  digitalWrite(pedRed, LOW);
+  
+  currentPhase = PED_GREEN;
+  phaseStartTime = millis();
+  
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Please Cross");
+  lcd.setCursor(0, 1); lcd.print("Watch for cars!");
+}
+
+// Setup
 void setup() {
-  initPins();
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) for(;;);
-  display.clearDisplay();
-  display.display();
-  
-  startMainLeftGo();
+  // Initialize all pins
+  pinMode(leftRed, OUTPUT); pinMode(leftYellow, OUTPUT);
+  pinMode(leftStraight, OUTPUT); pinMode(leftTurn, OUTPUT);
+  pinMode(stemRed, OUTPUT); pinMode(stemYellow, OUTPUT); pinMode(stemGreen, OUTPUT);
+  pinMode(pedRed, OUTPUT); pinMode(pedGreen, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(buttonPin, INPUT_PULLUP);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.print("T-Junction v3");
+  delay(2000);
+  lcd.clear();
+
+  // Initial state: Left green (straight + turn), Stem red, Ped red
+  setJunction(false, false, true, true, true, false, false);
+  setPedRed();
+  phaseStartTime = millis();
 }
 
+// Button debounce variables
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50;
+int buttonState = HIGH;
+int lastButtonState = HIGH;
+
+// Main loop
 void loop() {
-  checkButton();
-  updateSystem();
-}
-
-void initPins() {
-  pinMode(LEFT_G, OUTPUT); pinMode(LEFT_Y, OUTPUT); pinMode(LEFT_R, OUTPUT);
-  pinMode(RIGHT_G, OUTPUT); pinMode(RIGHT_Y, OUTPUT); pinMode(RIGHT_R, OUTPUT);
-  pinMode(STEM_G, OUTPUT); pinMode(STEM_Y, OUTPUT); pinMode(STEM_R, OUTPUT);
-  pinMode(PED_G, OUTPUT); pinMode(PED_R, OUTPUT);
-  pinMode(BUTTON, INPUT_PULLUP);
-  allOff();
-}
-
-void allOff() {
-  digitalWrite(LEFT_G, LOW); digitalWrite(LEFT_Y, LOW); digitalWrite(LEFT_R, LOW);
-  digitalWrite(RIGHT_G, LOW); digitalWrite(RIGHT_Y, LOW); digitalWrite(RIGHT_R, LOW);
-  digitalWrite(STEM_G, LOW); digitalWrite(STEM_Y, LOW); digitalWrite(STEM_R, LOW);
-  digitalWrite(PED_G, LOW); digitalWrite(PED_R, LOW);
-}
-
-// State functions
-void startMainLeftGo() {
-  allOff();
-  digitalWrite(LEFT_G, HIGH);
-  digitalWrite(RIGHT_R, HIGH);
-  digitalWrite(STEM_R, HIGH);
-  digitalWrite(PED_R, HIGH);
-  
-  currentState = MAIN_LEFT_GO;
-  stateStart = millis();
-  
-  show("MAIN LEFT GO", "Straight + Right Turn In");
-}
-
-void startMainRightGo() {
-  allOff();
-  digitalWrite(RIGHT_G, HIGH);
-  digitalWrite(LEFT_R, HIGH);
-  digitalWrite(STEM_R, HIGH);
-  digitalWrite(PED_R, HIGH);
-  
-  currentState = MAIN_RIGHT_GO;
-  stateStart = millis();
-  
-  show("MAIN RIGHT GO", "Straight + Left Turn In");
-}
-
-void startStemGo() {
-  allOff();
-  digitalWrite(LEFT_R, HIGH);
-  digitalWrite(RIGHT_R, HIGH);
-  digitalWrite(STEM_G, HIGH);
-  digitalWrite(PED_R, HIGH);
-  
-  currentState = STEM_GO;
-  stateStart = millis();
-  
-  show("STEM GO", "Turn Left/Right Out");
-}
-
-void startYellowClear() {
-  digitalWrite(LEFT_G, LOW);  digitalWrite(LEFT_Y, HIGH);
-  digitalWrite(RIGHT_G, LOW); digitalWrite(RIGHT_Y, HIGH);
-  digitalWrite(STEM_G, LOW);  digitalWrite(STEM_Y, HIGH);
-  
-  currentState = YELLOW_CLEAR;
-  stateStart = millis();
-  
-  show("YELLOW CLEAR", "All Prepare to Stop");
-  
-  cycleCount++;
-}
-
-void startPedWalk() {
-  allOff();
-  digitalWrite(LEFT_R, HIGH);
-  digitalWrite(RIGHT_R, HIGH);
-  digitalWrite(STEM_R, HIGH);
-  digitalWrite(PED_G, HIGH);
-  
-  currentState = PED_WALK;
-  stateStart = millis();
-  
-  show("WALK NOW", "All Vehicles Red");
-}
-
-void startPedFlash() {
-  currentState = PED_FLASH;
-  stateStart = millis();
-  
-  show("HURRY UP!", "Ped Flashing");
-}
-
-// Button check (only effective in vehicle phases)
-void checkButton() {
-  if (currentState == PED_WALK || currentState == PED_FLASH) return;
-  
-  if (digitalRead(BUTTON) == LOW && !btnDebounce) {
-    btnDebounce = true;
-    pedRequested = true;
-    show("Ped Requested", "Wait for cycle end");
+  // Read button with debounce
+  int reading = digitalRead(buttonPin);
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
   }
-  if (digitalRead(BUTTON) == HIGH) btnDebounce = false;
-}
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != buttonState) {
+      buttonState = reading;
+      if (buttonState == LOW && !pedRequest) {
+        pedRequest = true;
+        lcd.clear();
+        lcd.print("Pedestrian Request!");
+      }
+    }
+  }
+  lastButtonState = reading;
 
-// Main update
-void updateSystem() {
-  unsigned long now = millis();
-  unsigned long elapsed = now - stateStart;
-  
-  switch (currentState) {
-    case MAIN_LEFT_GO:
-      if (elapsed >= LEFT_GO_TIME) {
-        startMainRightGo();
+  unsigned long currentMillis = millis();
+  unsigned long elapsed;
+
+  switch (currentPhase) {
+
+    case LEFT_GREEN:
+      if (currentMillis - phaseStartTime >= GREEN_TIME) {
+        currentPhase = LEFT_TO_STEM_YELLOW;
+        phaseStartTime = currentMillis;
+        setJunction(false, true, false, false, false, true, false);  // Both yellow
+        lcd.clear(); lcd.print("Both Yellow");
       }
       break;
-      
-    case MAIN_RIGHT_GO:
-      if (elapsed >= RIGHT_GO_TIME) {
-        startStemGo();
-      }
-      break;
-      
-    case STEM_GO:
-      if (elapsed >= STEM_GO_TIME) {
-        startYellowClear();
-      }
-      break;
-      
-    case YELLOW_CLEAR:
-      if (elapsed >= YELLOW_TIME) {
-        bool needPed = pedRequested || (cycleCount % AUTO_PED_EVERY_CYCLES == 0 && cycleCount > 0);
-        if (needPed) {
-          pedRequested = false;
-          startPedWalk();
+
+    case LEFT_TO_STEM_YELLOW:
+      if (currentMillis - phaseStartTime >= YELLOW_TIME) {
+        if (pedRequest) {
+          nextPhaseAfterPed = STEM_GREEN;
+          goToPedPhase();
         } else {
-          startMainLeftGo(); 
+          setJunction(true, false, false, false, false, false, true);  // Left red, Stem green
+          currentPhase = STEM_GREEN;
+          phaseStartTime = currentMillis;
+          lcd.clear(); lcd.print("Stem Green");
         }
       }
       break;
-      
-    case PED_WALK:
-      updateCountdown(elapsed);
-      if (elapsed >= PED_TIME - PED_FLASH_TIME) {
-        startPedFlash();
+
+    case STEM_GREEN:
+      if (currentMillis - phaseStartTime >= GREEN_TIME) {
+        currentPhase = STEM_TO_LEFT_YELLOW;
+        phaseStartTime = currentMillis;
+        setJunction(false, true, false, false, false, true, false);  // Both yellow
+        lcd.clear(); lcd.print("Both Yellow");
       }
       break;
-      
-    case PED_FLASH:
-      digitalWrite(PED_G, (now / 500) % 2);
-      updateCountdown(elapsed);
+
+    case STEM_TO_LEFT_YELLOW:
+      if (currentMillis - phaseStartTime >= YELLOW_TIME) {
+        if (pedRequest) {
+          nextPhaseAfterPed = LEFT_GREEN;
+          goToPedPhase();
+        } else {
+          setJunction(false, false, true, true, true, false, false);  // Left green, Stem red
+          currentPhase = LEFT_GREEN;
+          phaseStartTime = currentMillis;
+          lcd.clear(); lcd.print("Left Green");
+        }
+      }
+      break;
+
+    case PED_GREEN:
+      elapsed = currentMillis - phaseStartTime;
+
       if (elapsed >= PED_TIME) {
-        startMainLeftGo();
+        // Pedestrian phase ends → resume previous cycle
+        digitalWrite(pedGreen, LOW);
+        digitalWrite(pedRed, HIGH);
+        noTone(buzzerPin);
+        lcd.clear();
+        lcd.print("Crossing Complete");
+        delay(1500);
+        lcd.clear();
+
+        if (nextPhaseAfterPed == STEM_GREEN) {
+          setJunction(true, false, false, false, false, false, true);
+          currentPhase = STEM_GREEN;
+          lcd.print("Stem Green");
+        } else {
+          setJunction(false, false, true, true, true, false, false);
+          currentPhase = LEFT_GREEN;
+          lcd.print("Left Green");
+        }
+        phaseStartTime = millis();
+        pedRequest = false;
+
+      } else if (elapsed >= PED_TIME - PED_FLASH_TIME) {
+        // Last 3 seconds: flashing green + beeping
+        bool flashOn = (millis() % 1000 < 500);
+        digitalWrite(pedGreen, flashOn);
+
+        // Beep every 600ms for 200ms
+        if ((millis() % 600) < 200) {
+          tone(buzzerPin, 1200);
+        } else {
+          noTone(buzzerPin);
+        }
+
+      } else {
+        // Normal pedestrian green
+        digitalWrite(pedGreen, HIGH);
+        noTone(buzzerPin);
       }
       break;
   }
-}
-
-// OLED
-void show(String l1, String l2) {
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(0,10);
-  display.println(l1);
-  display.setTextSize(1);
-  display.setCursor(0,40);
-  display.println(l2);
-  display.display();
-}
-
-void updateCountdown(unsigned long elapsed) {
-  unsigned long remain = PED_TIME - elapsed;
-  int sec = remain / 1000;
-  
-  display.clearDisplay();
-  display.setTextSize(4);
-  display.setCursor(30,10);
-  display.print(sec < 10 ? "0" : "");
-  display.print(sec);
-  display.print("s");
-  display.setTextSize(1);
-  display.setCursor(0,50);
-  display.println(currentState == PED_FLASH ? "HURRY! FLASHING" : "WALK NOW");
-  display.display();
 }
