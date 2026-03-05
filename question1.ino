@@ -23,14 +23,15 @@ const unsigned long PED_TIME       = 10000;
 const unsigned long PED_FLASH_TIME = 3000;  // Last 3 seconds: flashing + beeping
 
 // State machine phases
-enum Phase { LEFT_GREEN, LEFT_TO_STEM_YELLOW, STEM_GREEN, STEM_TO_LEFT_YELLOW, PED_GREEN };
+enum Phase { LEFT_GREEN, LEFT_TO_STEM_YELLOW, STEM_GREEN, STEM_TO_LEFT_YELLOW, PED_GREEN, PED_TO_STEM_YELLOW };  // New phase for safety yellow after ped to stem
 Phase currentPhase = LEFT_GREEN;
 Phase nextPhaseAfterPed = STEM_GREEN;  // Remember which phase to resume after pedestrian
 unsigned long phaseStartTime = 0;
 
 bool pedRequest = false;
 bool goToPedAfterYellow = false;  // Flag to handle delayed pedestrian phase after yellow
-int greenPhasesToWait = 0;  // New: Cooldown counter after pedestrian crossing (wait 2 green phases)
+int greenPhasesToWait = 0;  // Cooldown counter after pedestrian crossing (wait 2 green phases)
+unsigned long lastLcdUpdate = 0;  // For updating remaining seconds
 
 // Set all vehicle lights at once (junction control)
 void setJunction(bool lRed, bool lYel, bool lStr, bool lTur, bool sRed, bool sYel, bool sGre) {
@@ -57,10 +58,16 @@ void goToPedPhase() {
   
   currentPhase = PED_GREEN;
   phaseStartTime = millis();
+  lastLcdUpdate = 0;  // Reset for countdown
   
+  updateLcd("Pedestrian Green", "Cross Now! 10s");
+}
+
+// Update LCD with status on line 1, message on line 2
+void updateLcd(String line1, String line2) {
   lcd.clear();
-  lcd.setCursor(0, 0); lcd.print("Please Cross");
-  lcd.setCursor(0, 1); lcd.print("Watch for cars!");
+  lcd.setCursor(0, 0); lcd.print(line1.substring(0, 16));  // Truncate if too long
+  lcd.setCursor(0, 1); lcd.print(line2.substring(0, 16));
 }
 
 // Setup
@@ -75,14 +82,14 @@ void setup() {
 
   lcd.init();
   lcd.backlight();
-  lcd.print("T-Junction v5");
+  updateLcd("T-Junction v6", "Initializing...");
   delay(2000);
-  lcd.clear();
 
   // Initial state: Left green (straight + turn), Stem red, Ped red
   setJunction(false, false, true, true, true, false, false);
   setPedRed();
   phaseStartTime = millis();
+  updateLcd("Left Green", "Normal Operation");
 }
 
 // Button debounce variables
@@ -103,10 +110,9 @@ void loop() {
       buttonState = reading;
       if (buttonState == LOW && !pedRequest) {
         pedRequest = true;
-        lcd.clear();
-        lcd.print("Pedestrian Request!");
-        delay(1000);  // Short delay to show message, optional for debug
-        // Note: LCD will update in phases later
+        updateLcd(getCurrentStatus(), "Button Pressed");
+        delay(1000);  // Show for 1s
+        updateLcd(getCurrentStatus(), "Wait!");
       }
     }
   }
@@ -115,19 +121,21 @@ void loop() {
   unsigned long currentMillis = millis();
   unsigned long elapsed;
 
+  // Helper to get current status for LCD line 1
+  String currentStatus = getCurrentStatus();
+
   switch (currentPhase) {
 
     case LEFT_GREEN:
       if (currentMillis - phaseStartTime >= GREEN_TIME) {
         if (pedRequest && greenPhasesToWait <= 0) {
           goToPedAfterYellow = true;
-          nextPhaseAfterPed = STEM_GREEN;  // Would have gone to Stem next
+          nextPhaseAfterPed = STEM_GREEN;
         }
-        // Always enter yellow
         currentPhase = LEFT_TO_STEM_YELLOW;
         phaseStartTime = currentMillis;
         setJunction(false, true, false, false, false, true, false);  // Both yellow
-        lcd.clear(); lcd.print("Both Yellow");
+        updateLcd("Both Yellow", pedRequest ? "Wait!" : "Normal");
       }
       break;
 
@@ -135,14 +143,13 @@ void loop() {
       if (currentMillis - phaseStartTime >= YELLOW_TIME) {
         if (goToPedAfterYellow) {
           goToPedAfterYellow = false;
-          pedRequest = false;  // Clear after handling
+          pedRequest = false;
           goToPedPhase();
         } else {
           setJunction(true, false, false, false, false, false, true);  // Left red, Stem green
           currentPhase = STEM_GREEN;
           phaseStartTime = currentMillis;
-          lcd.clear(); lcd.print("Stem Green");
-          // Decrement cooldown if active
+          updateLcd("Stem Green", pedRequest ? "Wait!" : "Normal");
           if (greenPhasesToWait > 0) greenPhasesToWait--;
         }
       }
@@ -152,13 +159,12 @@ void loop() {
       if (currentMillis - phaseStartTime >= GREEN_TIME) {
         if (pedRequest && greenPhasesToWait <= 0) {
           goToPedAfterYellow = true;
-          nextPhaseAfterPed = LEFT_GREEN;  // Would have gone to Left next
+          nextPhaseAfterPed = LEFT_GREEN;
         }
-        // Always enter yellow
         currentPhase = STEM_TO_LEFT_YELLOW;
         phaseStartTime = currentMillis;
         setJunction(false, true, false, false, false, true, false);  // Both yellow
-        lcd.clear(); lcd.print("Both Yellow");
+        updateLcd("Both Yellow", pedRequest ? "Wait!" : "Normal");
       }
       break;
 
@@ -166,14 +172,13 @@ void loop() {
       if (currentMillis - phaseStartTime >= YELLOW_TIME) {
         if (goToPedAfterYellow) {
           goToPedAfterYellow = false;
-          pedRequest = false;  // Clear after handling
+          pedRequest = false;
           goToPedPhase();
         } else {
           setJunction(false, false, true, true, true, false, false);  // Left green, Stem red
           currentPhase = LEFT_GREEN;
           phaseStartTime = currentMillis;
-          lcd.clear(); lcd.print("Left Green");
-          // Decrement cooldown if active
+          updateLcd("Left Green", pedRequest ? "Wait!" : "Normal");
           if (greenPhasesToWait > 0) greenPhasesToWait--;
         }
       }
@@ -183,44 +188,74 @@ void loop() {
       elapsed = currentMillis - phaseStartTime;
 
       if (elapsed >= PED_TIME) {
-        // Pedestrian phase ends → resume previous cycle
         digitalWrite(pedGreen, LOW);
         digitalWrite(pedRed, HIGH);
         noTone(buzzerPin);
-        lcd.clear();
-        lcd.print("Crossing Complete");
+        updateLcd("Crossing Complete", "Normal");
         delay(1500);
-        lcd.clear();
 
-        if (nextPhaseAfterPed == STEM_GREEN) {
-          setJunction(true, false, false, false, false, false, true);
-          currentPhase = STEM_GREEN;
-          lcd.print("Stem Green");
-        } else {
+        greenPhasesToWait = 2;  // Start cooldown
+
+        if (nextPhaseAfterPed == LEFT_GREEN) {
+          // Directly to Left Green
           setJunction(false, false, true, true, true, false, false);
           currentPhase = LEFT_GREEN;
-          lcd.print("Left Green");
+          updateLcd("Left Green", "Normal");
+        } else {
+          // To new yellow phase before Stem Green
+          setJunction(false, true, false, false, false, true, false);  // Both yellow
+          currentPhase = PED_TO_STEM_YELLOW;
+          updateLcd("Both Yellow", "Normal");
         }
         phaseStartTime = millis();
-        greenPhasesToWait = 2;  // Start cooldown: wait 2 green phases before next ped
-
-      } else if (elapsed >= PED_TIME - PED_FLASH_TIME) {
-        // Last 3 seconds: flashing green + beeping
-        bool flashOn = (millis() % 1000 < 500);
-        digitalWrite(pedGreen, flashOn ? HIGH : LOW);
-
-        // Beep every 600ms for 200ms
-        if ((millis() % 600) < 200) {
-          tone(buzzerPin, 1200);
-        } else {
-          noTone(buzzerPin);
-        }
 
       } else {
-        // Normal pedestrian green: continuous buzzer tone
-        digitalWrite(pedGreen, HIGH);
-        tone(buzzerPin, 1000);  // Continuous long tone
+        // Update countdown every second
+        int remainingSec = (PED_TIME - elapsed) / 1000 + 1;  // Round up
+        if (currentMillis - lastLcdUpdate >= 1000) {
+          updateLcd("Pedestrian Green", "Cross Now! " + String(remainingSec) + "s");
+          lastLcdUpdate = currentMillis;
+        }
+
+        if (elapsed >= PED_TIME - PED_FLASH_TIME) {
+          // Flashing + beeping
+          bool flashOn = (millis() % 1000 < 500);
+          digitalWrite(pedGreen, flashOn ? HIGH : LOW);
+
+          if ((millis() % 600) < 200) {
+            tone(buzzerPin, 1200);
+          } else {
+            noTone(buzzerPin);
+          }
+        } else {
+          // Normal green + continuous tone
+          digitalWrite(pedGreen, HIGH);
+          tone(buzzerPin, 1000);
+        }
       }
       break;
+
+    case PED_TO_STEM_YELLOW:
+      if (currentMillis - phaseStartTime >= YELLOW_TIME) {
+        setJunction(true, false, false, false, false, false, true);  // Left red, Stem green
+        currentPhase = STEM_GREEN;
+        phaseStartTime = currentMillis;
+        updateLcd("Stem Green", "Normal");
+        if (greenPhasesToWait > 0) greenPhasesToWait--;
+      }
+      break;
+  }
+}
+
+// Helper to get current status string
+String getCurrentStatus() {
+  switch (currentPhase) {
+    case LEFT_GREEN: return "Left Green";
+    case STEM_GREEN: return "Stem Green";
+    case LEFT_TO_STEM_YELLOW:
+    case STEM_TO_LEFT_YELLOW:
+    case PED_TO_STEM_YELLOW: return "Both Yellow";
+    case PED_GREEN: return "Pedestrian Green";
+    default: return "Unknown";
   }
 }
