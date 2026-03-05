@@ -29,6 +29,7 @@ Phase nextPhaseAfterPed = STEM_GREEN;  // Remember which phase to resume after p
 unsigned long phaseStartTime = 0;
 
 bool pedRequest = false;
+bool goToPedAfterYellow = false;  // New flag to handle delayed pedestrian phase after yellow
 
 // Set all vehicle lights at once (junction control)
 void setJunction(bool lRed, bool lYel, bool lStr, bool lTur, bool sRed, bool sYel, bool sGre) {
@@ -73,7 +74,7 @@ void setup() {
 
   lcd.init();
   lcd.backlight();
-  lcd.print("T-Junction v3");
+  lcd.print("T-Junction v4");
   delay(2000);
   lcd.clear();
 
@@ -103,6 +104,8 @@ void loop() {
         pedRequest = true;
         lcd.clear();
         lcd.print("Pedestrian Request!");
+        delay(1000);  // Short delay to show message, optional for debug
+        // Note: LCD will update in phases later
       }
     }
   }
@@ -115,6 +118,11 @@ void loop() {
 
     case LEFT_GREEN:
       if (currentMillis - phaseStartTime >= GREEN_TIME) {
+        if (pedRequest) {
+          goToPedAfterYellow = true;
+          nextPhaseAfterPed = STEM_GREEN;  // Would have gone to Stem next
+        }
+        // Always enter yellow
         currentPhase = LEFT_TO_STEM_YELLOW;
         phaseStartTime = currentMillis;
         setJunction(false, true, false, false, false, true, false);  // Both yellow
@@ -124,8 +132,9 @@ void loop() {
 
     case LEFT_TO_STEM_YELLOW:
       if (currentMillis - phaseStartTime >= YELLOW_TIME) {
-        if (pedRequest) {
-          nextPhaseAfterPed = STEM_GREEN;
+        if (goToPedAfterYellow) {
+          goToPedAfterYellow = false;
+          pedRequest = false;  // Clear after handling
           goToPedPhase();
         } else {
           setJunction(true, false, false, false, false, false, true);  // Left red, Stem green
@@ -138,6 +147,11 @@ void loop() {
 
     case STEM_GREEN:
       if (currentMillis - phaseStartTime >= GREEN_TIME) {
+        if (pedRequest) {
+          goToPedAfterYellow = true;
+          nextPhaseAfterPed = LEFT_GREEN;  // Would have gone to Left next
+        }
+        // Always enter yellow
         currentPhase = STEM_TO_LEFT_YELLOW;
         phaseStartTime = currentMillis;
         setJunction(false, true, false, false, false, true, false);  // Both yellow
@@ -147,8 +161,9 @@ void loop() {
 
     case STEM_TO_LEFT_YELLOW:
       if (currentMillis - phaseStartTime >= YELLOW_TIME) {
-        if (pedRequest) {
-          nextPhaseAfterPed = LEFT_GREEN;
+        if (goToPedAfterYellow) {
+          goToPedAfterYellow = false;
+          pedRequest = false;  // Clear after handling
           goToPedPhase();
         } else {
           setJunction(false, false, true, true, true, false, false);  // Left green, Stem red
@@ -182,12 +197,11 @@ void loop() {
           lcd.print("Left Green");
         }
         phaseStartTime = millis();
-        pedRequest = false;
 
       } else if (elapsed >= PED_TIME - PED_FLASH_TIME) {
         // Last 3 seconds: flashing green + beeping
         bool flashOn = (millis() % 1000 < 500);
-        digitalWrite(pedGreen, flashOn);
+        digitalWrite(pedGreen, flashOn ? HIGH : LOW);
 
         // Beep every 600ms for 200ms
         if ((millis() % 600) < 200) {
@@ -197,9 +211,9 @@ void loop() {
         }
 
       } else {
-        // Normal pedestrian green
+        // Normal pedestrian green: continuous buzzer tone
         digitalWrite(pedGreen, HIGH);
-        noTone(buzzerPin);
+        tone(buzzerPin, 1000);  // Continuous long tone
       }
       break;
   }
