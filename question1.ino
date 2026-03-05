@@ -17,7 +17,7 @@ const int buzzerPin     = 11;
 const int buttonPin     = 12;
 
 // Timing constants (in milliseconds)
-const unsigned long GREEN_TIME     = 5000;
+const unsigned long GREEN_TIME     = 7000;  // Extended by 2 seconds
 const unsigned long YELLOW_TIME    = 3000;
 const unsigned long PED_TIME       = 10000;
 const unsigned long PED_FLASH_TIME = 3000;  // Last 3 seconds: flashing + beeping
@@ -29,7 +29,8 @@ Phase nextPhaseAfterPed = STEM_GREEN;  // Remember which phase to resume after p
 unsigned long phaseStartTime = 0;
 
 bool pedRequest = false;
-bool goToPedAfterYellow = false;  // New flag to handle delayed pedestrian phase after yellow
+bool goToPedAfterYellow = false;  // Flag to handle delayed pedestrian phase after yellow
+int greenPhasesToWait = 0;  // New: Cooldown counter after pedestrian crossing (wait 2 green phases)
 
 // Set all vehicle lights at once (junction control)
 void setJunction(bool lRed, bool lYel, bool lStr, bool lTur, bool sRed, bool sYel, bool sGre) {
@@ -74,7 +75,7 @@ void setup() {
 
   lcd.init();
   lcd.backlight();
-  lcd.print("T-Junction v4");
+  lcd.print("T-Junction v5");
   delay(2000);
   lcd.clear();
 
@@ -118,7 +119,7 @@ void loop() {
 
     case LEFT_GREEN:
       if (currentMillis - phaseStartTime >= GREEN_TIME) {
-        if (pedRequest) {
+        if (pedRequest && greenPhasesToWait <= 0) {
           goToPedAfterYellow = true;
           nextPhaseAfterPed = STEM_GREEN;  // Would have gone to Stem next
         }
@@ -141,13 +142,15 @@ void loop() {
           currentPhase = STEM_GREEN;
           phaseStartTime = currentMillis;
           lcd.clear(); lcd.print("Stem Green");
+          // Decrement cooldown if active
+          if (greenPhasesToWait > 0) greenPhasesToWait--;
         }
       }
       break;
 
     case STEM_GREEN:
       if (currentMillis - phaseStartTime >= GREEN_TIME) {
-        if (pedRequest) {
+        if (pedRequest && greenPhasesToWait <= 0) {
           goToPedAfterYellow = true;
           nextPhaseAfterPed = LEFT_GREEN;  // Would have gone to Left next
         }
@@ -170,6 +173,8 @@ void loop() {
           currentPhase = LEFT_GREEN;
           phaseStartTime = currentMillis;
           lcd.clear(); lcd.print("Left Green");
+          // Decrement cooldown if active
+          if (greenPhasesToWait > 0) greenPhasesToWait--;
         }
       }
       break;
@@ -197,6 +202,7 @@ void loop() {
           lcd.print("Left Green");
         }
         phaseStartTime = millis();
+        greenPhasesToWait = 2;  // Start cooldown: wait 2 green phases before next ped
 
       } else if (elapsed >= PED_TIME - PED_FLASH_TIME) {
         // Last 3 seconds: flashing green + beeping
