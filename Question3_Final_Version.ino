@@ -112,7 +112,7 @@ void loop() {
     } else {
       doCycle();                    // Perform one full cycle
       updateLCD();
-      delay(1500);                  // 1.5 seconds per cycle (including movement time)
+      delay(500);                  // 0.5 seconds per cycle (including movement time)
     }
   }
 
@@ -127,9 +127,9 @@ void loop() {
 // Perform one full stamp cycle: press down → wait → lift up
 void doCycle() {
   myservo.write(downAngle);   // Press down
-  delay(750);                 // Hold for 0.75 seconds
+  delay(500);                 // Hold for 0.5 seconds
   myservo.write(upAngle);     // Lift up
-  delay(750);                 // Hold for 0.75 seconds
+  delay(500);                 // Hold for 0.5 seconds
   cycleCount++;               // Increment cycle counter
 }
 
