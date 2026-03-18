@@ -35,8 +35,8 @@ const int GATE_OPEN_DURATION = 8000;   // Time (ms) to keep gate open after vali
 
 // === Authorized RFID Card UIDs (4-byte classic MIFARE) ===
 byte authorizedUIDs[][4] = {
-  {0x90, 0x39, 0xC7, 0x22},   // Example UID 1 - REPLACE WITH REAL ONES
-  {0xF3, 0xDD, 0x5B, 0xA7}    // Example UID 2
+  {0x90, 0x39, 0xC7, 0x22},   // UID 1 - Ring Card
+  {0xF3, 0xDD, 0x5B, 0xA7}    // UID 2 - Key Card
 };
 const int NUM_AUTHORIZED = 2;
 
